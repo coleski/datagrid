@@ -38,6 +38,12 @@ interface ScrollDragState {
   pointerOffset: number;
 }
 
+interface CellDragState {
+  isDragging: boolean;
+  startCell: { row: number; col: number } | null;
+  autoScrollInterval: ReturnType<typeof setInterval> | null;
+}
+
 interface UseCanvasInteractionsParams {
   canvasRef: RefObject<HTMLCanvasElement>;
   anchorCalculatorRef: MutableRefObject<AnchorCalculator | null>;
@@ -125,6 +131,79 @@ export function useCanvasInteractions(params: UseCanvasInteractionsParams): Canv
     controllerDragVisualRef,
   } = params;
 
+  // Track cell drag-to-select state
+  const cellDragStateRef = useRef<CellDragState>({
+    isDragging: false,
+    startCell: null,
+    autoScrollInterval: null,
+  });
+
+  // Auto-scroll edge threshold (in pixels)
+  const AUTO_SCROLL_THRESHOLD = 30;
+  const AUTO_SCROLL_SPEED = 10;
+
+  // Helper to clear auto-scroll interval
+  const clearAutoScroll = useCallback(() => {
+    if (cellDragStateRef.current.autoScrollInterval) {
+      clearInterval(cellDragStateRef.current.autoScrollInterval);
+      cellDragStateRef.current.autoScrollInterval = null;
+    }
+  }, []);
+
+  // Helper to handle auto-scrolling when dragging near edges
+  const handleAutoScroll = useCallback((x: number, y: number) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const currentState = handle.getState();
+    if (!currentState) return;
+
+    let scrollDx = 0;
+    let scrollDy = 0;
+
+    // Check vertical edges
+    if (y < AUTO_SCROLL_THRESHOLD) {
+      scrollDy = -AUTO_SCROLL_SPEED;
+    } else if (y > rect.height - AUTO_SCROLL_THRESHOLD) {
+      scrollDy = AUTO_SCROLL_SPEED;
+    }
+
+    // Check horizontal edges
+    if (x < AUTO_SCROLL_THRESHOLD) {
+      scrollDx = -AUTO_SCROLL_SPEED;
+    } else if (x > rect.width - AUTO_SCROLL_THRESHOLD) {
+      scrollDx = AUTO_SCROLL_SPEED;
+    }
+
+    if (scrollDx !== 0 || scrollDy !== 0) {
+      if (!cellDragStateRef.current.autoScrollInterval) {
+        cellDragStateRef.current.autoScrollInterval = setInterval(() => {
+          const state = handle.getState();
+          const newScrollTop = Math.max(0, state.scrollTop + scrollDy);
+          const newScrollLeft = Math.max(0, state.scrollLeft + scrollDx);
+          handle.setScroll(newScrollTop, newScrollLeft);
+
+          // Update selection with current mouse position
+          if (cellDragStateRef.current.isDragging && cellDragStateRef.current.startCell && anchorCalculatorRef.current) {
+            const mousePos = lastMousePosRef.current;
+            if (mousePos) {
+              const endCell = anchorCalculatorRef.current.getCellFromPoint(mousePos.x, mousePos.y);
+              if (endCell) {
+                handle.setSelection({
+                  type: 'cell',
+                  start: cellDragStateRef.current.startCell,
+                  end: endCell,
+                });
+              }
+            }
+          }
+        }, 50);
+      }
+    } else {
+      clearAutoScroll();
+    }
+  }, [canvasRef, handle, anchorCalculatorRef, lastMousePosRef, clearAutoScroll]);
+
   const handleMouseMove = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
     if (!anchorCalculatorRef.current) return;
 
@@ -135,6 +214,22 @@ export function useCanvasInteractions(params: UseCanvasInteractionsParams): Canv
     const y = event.clientY - rect.top;
     if (onDispatchEvent) onDispatchEvent({ type: 'pointerMove', payload: { x, y, nativeEvent: event } });
     lastMousePosRef.current = { x, y };
+
+    // Handle cell drag-to-select
+    if (cellDragStateRef.current.isDragging && cellDragStateRef.current.startCell) {
+      const endCell = anchorCalculatorRef.current.getCellFromPoint(x, y);
+      if (endCell) {
+        handle.setSelection({
+          type: 'cell',
+          start: cellDragStateRef.current.startCell,
+          end: endCell,
+        });
+      }
+
+      // Check if near edges to trigger auto-scroll
+      handleAutoScroll(x, y);
+      return;
+    }
 
     // Swallow interactions while dragging a scrollbar (controller handles scroll)
     if (dragStateRef.current.type) {
@@ -239,6 +334,7 @@ export function useCanvasInteractions(params: UseCanvasInteractionsParams): Canv
     theme,
     drawRef,
     onDispatchEvent,
+    handleAutoScroll,
   ]);
 
   const handleMouseDown = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -343,6 +439,13 @@ export function useCanvasInteractions(params: UseCanvasInteractionsParams): Canv
 
       handle.setSelection({ type: 'cell', start: cellPos, end: cellPos });
       keyboardManagerRef.current?.focusCell(cellPos.row, cellPos.col, false);
+
+      // Start drag-to-select
+      cellDragStateRef.current = {
+        isDragging: true,
+        startCell: cellPos,
+        autoScrollInterval: null,
+      };
     }
   }, [
     anchorCalculatorRef,
@@ -367,6 +470,14 @@ export function useCanvasInteractions(params: UseCanvasInteractionsParams): Canv
 
   const handleMouseUp = useCallback(() => {
     if (onDispatchEvent) onDispatchEvent({ type: 'pointerUp', payload: {} });
+
+    // Stop cell drag-to-select
+    if (cellDragStateRef.current.isDragging) {
+      cellDragStateRef.current.isDragging = false;
+      cellDragStateRef.current.startCell = null;
+      clearAutoScroll();
+    }
+
     if (dragStateRef.current.type) {
       dragStateRef.current = { type: null, startMousePos: 0, startScrollPos: 0, pointerOffset: 0 };
       setScrollbarDragging(false);
@@ -384,6 +495,7 @@ export function useCanvasInteractions(params: UseCanvasInteractionsParams): Canv
     setHoveringVerticalThumb,
     setScrollbarDragging,
     onDispatchEvent,
+    clearAutoScroll,
   ]);
 
   // Keep drag interactions alive off-canvas for scrollbar and column drag
@@ -417,6 +529,14 @@ export function useCanvasInteractions(params: UseCanvasInteractionsParams): Canv
 
   const handleMouseLeave = useCallback(() => {
     if (onDispatchEvent) onDispatchEvent({ type: 'pointerLeave', payload: {} });
+
+    // Stop cell drag-to-select
+    if (cellDragStateRef.current.isDragging) {
+      cellDragStateRef.current.isDragging = false;
+      cellDragStateRef.current.startCell = null;
+      clearAutoScroll();
+    }
+
     cancelResizeHover();
     setHoveredCellIfChanged(null);
     setScrollbarHovering(false);
@@ -442,7 +562,15 @@ export function useCanvasInteractions(params: UseCanvasInteractionsParams): Canv
     setHoveringVerticalThumb,
     setScrollbarHovering,
     onDispatchEvent,
+    clearAutoScroll,
   ]);
+
+  // Cleanup auto-scroll interval on unmount
+  useEffect(() => {
+    return () => {
+      clearAutoScroll();
+    };
+  }, [clearAutoScroll]);
 
   const handleContextMenu = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
     if (!onContextMenu || !anchorCalculatorRef.current) return;
