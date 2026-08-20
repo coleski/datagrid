@@ -1,3 +1,5 @@
+
+
 # @coleski/datagrid
 
 [![npm version](https://img.shields.io/npm/v/@coleski/datagrid.svg)](https://www.npmjs.com/package/@coleski/datagrid)
@@ -20,10 +22,10 @@ yarn add @coleski/datagrid
 ## Quick Start
 
 ```tsx
-import { Grid } from '@coleski/datagrid'
+import { CanvasDataGrid } from '@coleski/datagrid'
 
 function App() {
-  return <Grid />
+  return <CanvasDataGrid rows={[['Hello']]} headers={['Name']} />
 }
 ```
 
